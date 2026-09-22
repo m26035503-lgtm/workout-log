@@ -231,7 +231,9 @@ const GIST_DESC='workout-log-data-v1';
 const GIST_FILE='workout-log.json';
 function nowClock(){const d=new Date();return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')}
 async function ghApi(token,path,opts){
-  const res=await fetch('https://api.github.com'+path,Object.assign({headers:Object.assign({Authorization:'token '+token,Accept:'application/vnd.github+json'},(opts&&opts.headers)||{})},opts||{}));
+  opts=opts||{};
+  const headers=Object.assign({Authorization:'token '+token,Accept:'application/vnd.github+json'},opts.headers||{});
+  const res=await fetch('https://api.github.com'+path,Object.assign({},opts,{headers}));
   if(!res.ok){const err=new Error('gh-'+res.status);err.status=res.status;throw err;}
   return res.status===204?null:res.json();
 }
