@@ -120,6 +120,7 @@ textarea.small{min-height:90px}
 .btn.alt{background:#fff;color:var(--ink);border:1px solid var(--ink)}
 .btnrow{display:flex;gap:8px;flex-wrap:wrap}
 .note{font-size:13px;color:var(--sub);margin:6px 0}
+.note.warn{color:#B3261E;font-weight:600}
 
 /* nav + toast */
 .nav{position:fixed;left:0;right:0;bottom:0;background:#fff;border-top:1px solid var(--line);
@@ -210,7 +211,8 @@ for(let v=62.5;v<=200;v+=2.5)KG.push({v:v,t:v+' kg'});
 /* ---------- 狀態 ---------- */
 const KEY='workout-logs-v1';
 const WD=['日','一','二','三','四','五','六'];
-const state={view:'train',part:'mon',date:ds(new Date()),logs:{},open:{},del:null,month:null,tipsOpen:false};
+const state={view:'train',part:'mon',date:ds(new Date()),logs:{},open:{},del:null,month:null,tipsOpen:false,
+  syncToken:null,syncGistId:null,syncMsg:'',syncErr:false,syncBusy:false};
 let hasStore=false;
 try{localStorage.setItem('__t','1');localStorage.removeItem('__t');hasStore=true;}catch(e){hasStore=false;}
 const app=document.getElementById('app');
@@ -225,6 +227,99 @@ function setLabel(ex,x){return repLabel(x.r)+(ex.side?'（每側）':'')+' · '+
 function setsLine(ex,arr){return arr.map(x=>setLabel(ex,x)).join('、')}
 
 /* ---------- 儲存 ---------- */
+const GIST_DESC='workout-log-data-v1';
+const GIST_FILE='workout-log.json';
+function nowClock(){const d=new Date();return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')}
+async function ghApi(token,path,opts){
+  const res=await fetch('https://api.github.com'+path,Object.assign({headers:Object.assign({Authorization:'token '+token,Accept:'application/vnd.github+json'},(opts&&opts.headers)||{})},opts||{}));
+  if(!res.ok){const err=new Error('gh-'+res.status);err.status=res.status;throw err;}
+  return res.status===204?null:res.json();
+}
+async function ghFindGistId(token){
+  const list=await ghApi(token,'/gists?per_page=100');
+  const found=(list||[]).find(g=>g.description===GIST_DESC);
+  return found?found.id:null;
+}
+async function ghCreateGist(token,data){
+  const j=await ghApi(token,'/gists',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({description:GIST_DESC,public:false,files:{[GIST_FILE]:{content:JSON.stringify(data)}}})});
+  return j.id;
+}
+async function ghGetGist(token,id){
+  const j=await ghApi(token,'/gists/'+id);
+  const f=j.files&&j.files[GIST_FILE];
+  if(!f)return{};
+  let content=f.content;
+  if(f.truncated){const r=await fetch(f.raw_url);content=await r.text();}
+  try{return JSON.parse(content)||{}}catch(e){return{}}
+}
+async function ghUpdateGist(token,id,data){
+  await ghApi(token,'/gists/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({files:{[GIST_FILE]:{content:JSON.stringify(data)}}})});
+}
+function mergeLogs(remote,local){
+  const merged=JSON.parse(JSON.stringify(remote||{}));
+  Object.keys(local||{}).forEach(d=>{
+    if(!merged[d])merged[d]={};
+    Object.keys(local[d]).forEach(p=>{
+      if(!merged[d][p])merged[d][p]={};
+      Object.keys(local[d][p]).forEach(id=>{merged[d][p][id]=local[d][p][id];});
+    });
+  });
+  return merged;
+}
+function setSyncMsg(t,err){state.syncMsg=t;state.syncErr=!!err;const el=document.getElementById('syncmsg');if(el){el.textContent=t;el.className=err?'note warn':'note'}}
+async function connectSync(token){
+  state.syncBusy=true;setSyncMsg('連線中…');
+  try{
+    let id=localStorage.getItem('gh_gist_id');
+    if(id){
+      try{
+        const remote=await ghGetGist(token,id);
+        state.logs=mergeLogs(remote,state.logs);
+        await ghUpdateGist(token,id,state.logs);
+      }catch(e){id=null;}
+    }
+    if(!id){
+      id=await ghFindGistId(token);
+      if(id){
+        const remote=await ghGetGist(token,id);
+        state.logs=mergeLogs(remote,state.logs);
+        await ghUpdateGist(token,id,state.logs);
+      }else{
+        id=await ghCreateGist(token,state.logs);
+      }
+    }
+    localStorage.setItem('gh_token',token);
+    localStorage.setItem('gh_gist_id',id);
+    state.syncToken=token;state.syncGistId=id;
+    if(hasStore)localStorage.setItem(KEY,JSON.stringify(state.logs));
+    setSyncMsg('已連接，'+nowClock()+' 同步完成');
+  }catch(e){
+    setSyncMsg('連線失敗，請確認授權碼是否有 gist 權限',true);
+  }
+  state.syncBusy=false;
+}
+function disconnectSync(){
+  localStorage.removeItem('gh_token');localStorage.removeItem('gh_gist_id');
+  state.syncToken=null;state.syncGistId=null;
+  setSyncMsg('已中斷同步，資料仍保留在這支裝置上');
+}
+async function pushSync(){
+  if(!state.syncToken||!state.syncGistId)return;
+  setSyncMsg('同步中…');
+  try{await ghUpdateGist(state.syncToken,state.syncGistId,state.logs);setSyncMsg('已同步，'+nowClock());}
+  catch(e){setSyncMsg('同步失敗，稍後會重試',true);}
+}
+async function pullSync(){
+  if(!state.syncToken||!state.syncGistId)return;
+  setSyncMsg('拉取中…');
+  try{
+    const remote=await ghGetGist(state.syncToken,state.syncGistId);
+    state.logs=mergeLogs(remote,state.logs);
+    if(hasStore)localStorage.setItem(KEY,JSON.stringify(state.logs));
+    setSyncMsg('已更新，'+nowClock());
+    render();
+  }catch(e){setSyncMsg('拉取失敗，請檢查網路',true);}
+}
 function migrate(logs){
   Object.keys(logs||{}).forEach(d=>Object.keys(logs[d]).forEach(p=>Object.keys(logs[d][p]).forEach(id=>{
     const it=logs[d][p][id];
@@ -249,7 +344,8 @@ function persist(){
 async function saveNow(){
   if(!hasStore){setStatus('未自動保存，請定期備份',true);return}
   try{localStorage.setItem(KEY,JSON.stringify(state.logs));setStatus('已儲存 ✓');}
-  catch(e){hasStore=false;setStatus('無法保存，請備份',true)}
+  catch(e){hasStore=false;setStatus('無法保存，請備份',true);return}
+  if(state.syncToken&&state.syncGistId)pushSync();
 }
 function setStatus(t,warn){const el=document.getElementById('status');if(el){el.textContent=t;el.className=warn?'warn':''}}
 function toast(t){const el=document.getElementById('toast');el.textContent=t;el.hidden=false;clearTimeout(toast.t);toast.t=setTimeout(()=>el.hidden=true,2200)}
@@ -468,7 +564,16 @@ function analysisView(){
       '<p class="note">月底複製上面整段，貼到新的對話，Claude 就能幫你整理狀況與調整建議。</p>';
   }
   return '<main><div class="dayhead" style="--c:var(--ink)"><h2 style="color:var(--ink)">月度分析</h2></div>'+sel+body+
-    '<h4>備份與還原</h4>'+
+    '<h4>雲端同步（跨裝置）</h4>'+
+    (state.syncToken?
+      ('<p class="note">此裝置已連接同步。'+(state.syncMsg?state.syncMsg:'')+'</p>'+
+       '<div class="btnrow"><button class="btn alt" data-act="ghpull">立即從雲端更新</button><button class="btn alt" data-act="ghdisconnect">中斷連線</button></div>')
+      :
+      ('<p class="note">用你的 GitHub 帳號，把資料存到一個只有你能看到的 Gist，之後在其他裝置貼上同一組授權碼，就能看到同一份資料。授權碼只要勾選「gist」權限即可，不需要其他權限。</p>'+
+       '<input type="password" id="ghtoken" placeholder="貼上 GitHub 授權碼（ghp_開頭）" autocomplete="off" style="width:100%;height:44px;border:1px solid var(--line);border-radius:8px;padding:0 10px;margin-top:6px">'+
+       '<div class="btnrow"><button class="btn" data-act="ghconnect">連接同步</button></div>'+
+       (state.syncMsg?'<p class="note'+(state.syncErr?' warn':'')+'" id="syncmsg">'+state.syncMsg+'</p>':'<p class="note" id="syncmsg"></p>')))+
+    '<h4>手動備份與還原</h4>'+
     (hasStore?'':'<div class="banner">此環境不會自動保存，請養成每次訓練後備份的習慣。</div>')+
     '<p class="note">備份會包含全部月份的紀錄。換裝置或資料不見時，把備份貼到下方即可還原（會與現有資料合併）。</p>'+
     '<div class="btnrow"><button class="btn alt" data-act="copyb">複製全部備份</button></div>'+
@@ -536,6 +641,13 @@ app.addEventListener('click',async e=>{
       state.del=null;persist();render();toast('已刪除');
     }else{state.del=key;render();}
   }
+  else if(a==='ghconnect'){
+    const t=document.getElementById('ghtoken');const tok=t&&t.value.trim();
+    if(!tok){toast('請先貼上授權碼');return}
+    await connectSync(tok);render();
+  }
+  else if(a==='ghdisconnect'){disconnectSync();render();}
+  else if(a==='ghpull'){await pullSync();}
   else if(a==='copym'){const t=document.getElementById('mtext');const ok=await copyText(t.value);if(!ok){t.removeAttribute('readonly');t.focus();t.select();}toast(ok?'已複製，貼給 Claude 就可以了':'請長按全選後手動複製');}
   else if(a==='copyb'){const ok=await copyText(JSON.stringify({version:1,logs:state.logs}));toast(ok?'已複製全部備份':'複製失敗，請再試一次');}
   else if(a==='import'){
@@ -585,7 +697,12 @@ app.addEventListener('toggle',e=>{if(e.target.classList&&e.target.classList.cont
 if('serviceWorker' in navigator){window.addEventListener('load',()=>{try{navigator.serviceWorker.register('sw.js').catch(()=>{})}catch(e){}});}
 autoPart();
 render();
-loadAll().then(()=>{render();if(hasStore)setStatus('');});
+loadAll().then(async()=>{
+  render();
+  if(hasStore)setStatus('');
+  const savedToken=hasStore?localStorage.getItem('gh_token'):null;
+  if(savedToken){await connectSync(savedToken);render();}
+});
 })();
 </script>
 </body>
