@@ -82,6 +82,14 @@ select{width:100%;height:44px;border:1px solid var(--line);border-radius:8px;bac
 .rowbtns button{flex:1;min-width:130px;height:42px;border:1px dashed var(--c);background:#fff;border-radius:8px;color:var(--c);font-size:14px}
 .why{margin-top:8px;border:0;background:none;color:var(--sub);font-size:13px;padding:6px 0;text-decoration:underline}
 .logic{margin:2px 0 4px;font-size:14px;color:var(--ink)}
+.tag{display:inline-block;font-size:11px;font-weight:600;color:var(--c);border:1px solid var(--c);border-radius:5px;padding:1px 6px;vertical-align:middle}
+.delex{display:block;width:100%;margin-top:10px;height:40px;border:1px solid #E4B4B0;background:#fff;border-radius:8px;color:#B3261E;font-size:13px}
+.delex.sure{background:#B3261E;color:#fff;border-color:#B3261E}
+.addex-toggle{display:block;width:100%;height:48px;margin:14px 0 4px;border:1px dashed var(--line);background:#fff;border-radius:10px;color:var(--sub);font-size:15px}
+.addex-form{background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px;margin:14px 0 4px}
+.addex-form input{width:100%;height:44px;border:1px solid var(--line);border-radius:8px;background:#fff;padding:0 10px}
+.addex-form .rowbtns button{border-style:solid;background:var(--ink);color:#fff;border-color:var(--ink)}
+.addex-form .rowbtns button[data-act="addtoggle"]{background:#fff;color:var(--sub);border-color:var(--line)}
 
 /* log */
 .entry{background:#fff;border:1px solid var(--line);border-left:5px solid var(--c);border-radius:10px;padding:12px;margin:10px 0}
@@ -211,7 +219,7 @@ for(let v=62.5;v<=200;v+=2.5)KG.push({v:v,t:v+' kg'});
 /* ---------- 狀態 ---------- */
 const KEY='workout-logs-v1';
 const WD=['日','一','二','三','四','五','六'];
-const state={view:'train',part:'mon',date:ds(new Date()),logs:{},open:{},del:null,month:null,tipsOpen:false,
+const state={view:'train',part:'mon',date:ds(new Date()),logs:{},customEx:{},open:{},del:null,delEx:null,addOpen:{},month:null,tipsOpen:false,
   syncToken:null,syncGistId:null,syncMsg:'',syncErr:false,syncBusy:false};
 let hasStore=false;
 try{localStorage.setItem('__t','1');localStorage.removeItem('__t');hasStore=true;}catch(e){hasStore=false;}
@@ -225,6 +233,25 @@ function repLabel(r){return r===null||r===undefined?'?':(r==='F'?'力竭':r+'下
 function kgLabel(k){return k===null||k===undefined?'未填':(k===0?'自重':k+'kg')}
 function setLabel(ex,x){return repLabel(x.r)+(ex.side?'（每側）':'')+' · '+kgLabel(x.k)}
 function setsLine(ex,arr){return arr.map(x=>setLabel(ex,x)).join('、')}
+
+/* ---------- 自訂動作 ---------- */
+const CUSTOM_KEY='custom-exercises-v1';
+function loadCustomLocal(){
+  if(!hasStore)return;
+  try{const v=localStorage.getItem(CUSTOM_KEY);if(v)state.customEx=JSON.parse(v)||{};}catch(e){}
+}
+function saveCustomLocal(){
+  if(!hasStore)return;
+  try{localStorage.setItem(CUSTOM_KEY,JSON.stringify(state.customEx));}catch(e){}
+}
+function persistCustom(){
+  saveCustomLocal();
+  if(state.syncToken&&state.syncGistId)pushSync();
+}
+function allExOfPart(partId){return partOf(partId).ex.concat(state.customEx[partId]||[]);}
+function findExAny(partId,id){
+  return allExOfPart(partId).find(e=>e.id===id)||{id:id,name:'（已刪除的自訂動作）',muscle:'',side:false,sets:3,reps:'',rd:null};
+}
 
 /* ---------- 儲存 ---------- */
 const GIST_DESC='workout-log-data-v1';
@@ -268,6 +295,26 @@ function mergeLogs(remote,local){
   });
   return merged;
 }
+function mergeCustom(remote,local){
+  const merged=JSON.parse(JSON.stringify(remote||{}));
+  Object.keys(local||{}).forEach(p=>{
+    const arr=merged[p]?merged[p].slice():[];
+    const idx={};arr.forEach((x,i)=>{idx[x.id]=i;});
+    (local[p]||[]).forEach(x=>{
+      if(idx[x.id]!==undefined)arr[idx[x.id]]=x;else{arr.push(x);idx[x.id]=arr.length-1;}
+    });
+    merged[p]=arr;
+  });
+  return merged;
+}
+function syncPayload(){return{logs:state.logs,customEx:state.customEx};}
+function applyRemote(obj){
+  let remoteLogs,remoteCustom;
+  if(obj&&typeof obj==='object'&&'logs'in obj){remoteLogs=obj.logs||{};remoteCustom=obj.customEx||{};}
+  else{remoteLogs=obj||{};remoteCustom={};}
+  state.logs=mergeLogs(remoteLogs,state.logs);
+  state.customEx=mergeCustom(remoteCustom,state.customEx);
+}
 function setSyncMsg(t,err){state.syncMsg=t;state.syncErr=!!err;const el=document.getElementById('syncmsg');if(el){el.textContent=t;el.className=err?'note warn':'note'}}
 async function connectSync(token){
   state.syncBusy=true;setSyncMsg('連線中…');
@@ -276,24 +323,25 @@ async function connectSync(token){
     if(id){
       try{
         const remote=await ghGetGist(token,id);
-        state.logs=mergeLogs(remote,state.logs);
-        await ghUpdateGist(token,id,state.logs);
+        applyRemote(remote);
+        await ghUpdateGist(token,id,syncPayload());
       }catch(e){id=null;}
     }
     if(!id){
       id=await ghFindGistId(token);
       if(id){
         const remote=await ghGetGist(token,id);
-        state.logs=mergeLogs(remote,state.logs);
-        await ghUpdateGist(token,id,state.logs);
+        applyRemote(remote);
+        await ghUpdateGist(token,id,syncPayload());
       }else{
-        id=await ghCreateGist(token,state.logs);
+        id=await ghCreateGist(token,syncPayload());
       }
     }
     localStorage.setItem('gh_token',token);
     localStorage.setItem('gh_gist_id',id);
     state.syncToken=token;state.syncGistId=id;
     if(hasStore)localStorage.setItem(KEY,JSON.stringify(state.logs));
+    saveCustomLocal();
     setSyncMsg('已連接，'+nowClock()+' 同步完成');
   }catch(e){
     setSyncMsg('連線失敗，請確認授權碼是否有 gist 權限',true);
@@ -308,7 +356,7 @@ function disconnectSync(){
 async function pushSync(){
   if(!state.syncToken||!state.syncGistId)return;
   setSyncMsg('同步中…');
-  try{await ghUpdateGist(state.syncToken,state.syncGistId,state.logs);setSyncMsg('已同步，'+nowClock());}
+  try{await ghUpdateGist(state.syncToken,state.syncGistId,syncPayload());setSyncMsg('已同步，'+nowClock());}
   catch(e){setSyncMsg('同步失敗，稍後會重試',true);}
 }
 async function pullSync(){
@@ -316,8 +364,9 @@ async function pullSync(){
   setSyncMsg('拉取中…');
   try{
     const remote=await ghGetGist(state.syncToken,state.syncGistId);
-    state.logs=mergeLogs(remote,state.logs);
+    applyRemote(remote);
     if(hasStore)localStorage.setItem(KEY,JSON.stringify(state.logs));
+    saveCustomLocal();
     setSyncMsg('已更新，'+nowClock());
     render();
   }catch(e){setSyncMsg('拉取失敗，請檢查網路',true);}
@@ -388,7 +437,7 @@ function rowDefault(ex,arr,last,idx){
   if(arr.length)return{r:arr[arr.length-1].r,k:arr[arr.length-1].k};
   return{r:ex.rd,k:null};
 }
-function findEx(id){return partOf(state.part).ex.find(e=>e.id===id)}
+function findEx(id){return allExOfPart(state.part).find(e=>e.id===id)}
 function md(d){const x=pd(d);return (x.getMonth()+1)+'/'+x.getDate()}
 
 /* ---------- 畫面：共用 ---------- */
@@ -415,8 +464,9 @@ function cardHTML(ex){
     '<select data-f="k" data-ex="'+ex.id+'" data-i="'+i+'" aria-label="第'+(i+1)+'組公斤">'+opts(KG,x.k,'公斤')+'</select>'+
     '<button class="delrow" data-act="delrow" data-ex="'+ex.id+'" data-i="'+i+'" aria-label="刪除第'+(i+1)+'組">×</button></div>').join('');
   const needSug=arr.length<ex.sets;
-  return '<article class="card'+(arr.length?' done':'')+'" data-card="'+ex.id+'">'+
-    '<div class="h"><h3>'+ex.name+'</h3><span class="rec">建議 '+ex.sets+' 組 × '+ex.reps+'</span></div>'+
+  const delSure=state.delEx===(state.part+'|'+ex.id);
+  return '<article class="card'+(arr.length?' done':'')+(ex.custom?' iscustom':'')+'" data-card="'+ex.id+'">'+
+    '<div class="h"><h3>'+ex.name+(ex.custom?' <span class="tag">自訂</span>':'')+'</h3><span class="rec">建議 '+ex.sets+' 組 × '+ex.reps+'</span></div>'+
     '<p class="muscle">'+ex.muscle+'</p>'+
     '<p class="last'+(last?'':' none')+'">'+lastTxt+'</p>'+
     '<div class="rows">'+rows+'</div>'+
@@ -424,14 +474,25 @@ function cardHTML(ex){
       (needSug?'<button data-act="fillsug" data-ex="'+ex.id+'">+ 依建議補到 '+ex.sets+' 組</button>':'')+
       '<button data-act="addrow" data-ex="'+ex.id+'">+ 新增一組</button>'+
     '</div>'+
-    '<button class="why" data-act="why" data-ex="'+ex.id+'">'+(state.open[ex.id]?'收起說明':'為什麼這樣排')+'</button>'+
-    (state.open[ex.id]?'<p class="logic">'+ex.why+'</p>':'')+
+    (ex.why?'<button class="why" data-act="why" data-ex="'+ex.id+'">'+(state.open[ex.id]?'收起說明':'為什麼這樣排')+'</button>':'')+
+    (state.open[ex.id]&&ex.why?'<p class="logic">'+ex.why+'</p>':'')+
+    (ex.custom?'<button class="delex'+(delSure?' sure':'')+'" data-act="delex" data-ex="'+ex.id+'">'+(delSure?'確定刪除這個動作':'刪除這個自訂動作')+'</button>':'')+
     '</article>';
 }
 function progText(){
-  const P=partOf(state.part);
-  const n=P.ex.filter(e=>{const it=getItem(state.date,P.id,e.id);return it&&it.sets&&it.sets.length}).length;
-  return '已記 '+n+' / '+P.ex.length+' 項';
+  const list=allExOfPart(state.part);
+  const n=list.filter(e=>{const it=getItem(state.date,state.part,e.id);return it&&it.sets&&it.sets.length}).length;
+  return '已記 '+n+' / '+list.length+' 項';
+}
+function addFormHTML(partId){
+  if(!state.addOpen[partId])return '<button class="addex-toggle" data-act="addtoggle" data-p="'+partId+'">+ 自己新增一個動作</button>';
+  return '<div class="addex-form">'+
+    '<span class="lab">動作名稱</span><input id="newexname" type="text" placeholder="例如：史密斯機臀推" maxlength="30">'+
+    '<span class="lab">訓練肌群（選填）</span><input id="newexmuscle" type="text" placeholder="例如：臀大肌" maxlength="30">'+
+    '<div class="two"><div><span class="lab">建議組數</span><input id="newexsets" type="number" min="1" max="10" value="3"></div>'+
+    '<div><span class="lab">建議次數</span><input id="newexreps" type="text" placeholder="例如 10-15" value="10-15" maxlength="12"></div></div>'+
+    '<div class="rowbtns"><button data-act="addex" data-p="'+partId+'">新增動作</button><button data-act="addtoggle" data-p="'+partId+'">取消</button></div>'+
+    '</div>';
 }
 function trainView(){
   const P=partOf(state.part);
@@ -446,7 +507,8 @@ function trainView(){
     '<div class="dayhead"><h2>'+P.day+'　'+P.name+'</h2><span id="prog">'+progText()+'</span></div>'+
     '<details class="tips"'+(state.tipsOpen?' open':'')+'><summary>動作要點</summary><ul>'+P.tips.map(t=>'<li>'+t+'</li>').join('')+'</ul></details>'+
     '<p class="hint">每一組可以各自填不同的次數和公斤（例如遞增或遞減組）。啞鈴填單手重量，槓鈴填總重（含槓）；自重動作選 0。選好會自動儲存，也可以練完按下方按鈕再存一次確認。'+(dow===0||dow===6?'（今天是週末，可自行選部位補練）':'')+'</p>'+
-    P.ex.map(cardHTML).join('')+
+    allExOfPart(P.id).map(cardHTML).join('')+
+    addFormHTML(P.id)+
     '<button class="btn savebar" data-act="savetoday">儲存今日紀錄</button>'+
     '</main>';
 }
@@ -467,7 +529,7 @@ function logView(){
   dates.forEach(d=>{
     PARTS.forEach(P=>{
       const day=state.logs[d][P.id];if(!day)return;
-      const rows=P.ex.filter(e=>day[e.id]&&day[e.id].sets&&day[e.id].sets.length).map(e=>{const it=day[e.id];return '<li><div class="exname">'+e.name+'（'+it.sets.length+' 組）</div><div class="exsets">'+setsLine(e,it.sets)+'</div></li>'});
+      const rows=Object.keys(day).filter(id=>day[id]&&day[id].sets&&day[id].sets.length).map(id=>{const e=findExAny(P.id,id);const it=day[id];return '<li><div class="exname">'+e.name+'（'+it.sets.length+' 組）</div><div class="exsets">'+setsLine(e,it.sets)+'</div></li>'});
       if(!rows.length)return;
       const key=d+'|'+P.id;const sure=state.del===key;
       html+='<section class="entry" style="--c:var('+P.color+')"><div class="h"><h3>'+md(d)+'（週'+WD[pd(d).getDay()]+'）<span>'+P.name+'</span></h3></div>'+
@@ -494,8 +556,9 @@ function monthData(m){
     PARTS.forEach(P=>{
       const day=state.logs[d][P.id];if(!day)return;
       let any=false;
-      P.ex.forEach(e=>{
-        const it=day[e.id];if(!it||!it.sets||!it.sets.length)return;
+      Object.keys(day).forEach(id=>{
+        const it=day[id];if(!it||!it.sets||!it.sets.length)return;
+        const e=findExAny(P.id,id);
         any=true;totalSets+=it.sets.length;
         it.sets.forEach(x=>{(hist[e.name]=hist[e.name]||[]).push({d:d,k:x.k,r:x.r});});
       });
@@ -525,11 +588,12 @@ function monthText(m){
   D.dates.forEach(d=>{
     PARTS.forEach(P=>{
       const day=state.logs[d][P.id];if(!day)return;
-      const rows=P.ex.filter(e=>day[e.id]&&day[e.id].sets&&day[e.id].sets.length);
-      if(!rows.length)return;
+      const ids=Object.keys(day).filter(id=>day[id]&&day[id].sets&&day[id].sets.length);
+      if(!ids.length)return;
       L.push(md(d)+'（週'+WD[pd(d).getDay()]+'）'+P.name);
-      rows.forEach(e=>{
-        const it=day[e.id];
+      ids.forEach(id=>{
+        const e=findExAny(P.id,id);
+        const it=day[id];
         const parts=it.sets.map(x=>{
           const r=x.r===null||x.r===undefined?'?':(x.r==='F'?'力竭':x.r+'次');
           const k=x.k===null||x.k===undefined?'公斤未填':(x.k===0?'自重':x.k+'kg');
@@ -638,10 +702,42 @@ app.addEventListener('click',async e=>{
   else if(a==='del'){
     const key=b.dataset.d+'|'+b.dataset.p;
     if(state.del===key){
-      const P=partOf(b.dataset.p);
-      P.ex.forEach(x=>delItem(b.dataset.d,b.dataset.p,x.id));
+      const day=state.logs[b.dataset.d]&&state.logs[b.dataset.d][b.dataset.p];
+      if(day)Object.keys(day).forEach(id=>delItem(b.dataset.d,b.dataset.p,id));
       state.del=null;persist();render();toast('已刪除');
     }else{state.del=key;render();}
+  }
+  else if(a==='addtoggle'){
+    const p=b.dataset.p;
+    state.addOpen[p]=!state.addOpen[p];
+    render();
+    if(state.addOpen[p]){const el=document.getElementById('newexname');if(el)el.focus();}
+  }
+  else if(a==='addex'){
+    const p=b.dataset.p;
+    const nameEl=document.getElementById('newexname');
+    const name=nameEl&&nameEl.value.trim();
+    if(!name){toast('請先填動作名稱');return}
+    const muscle=(document.getElementById('newexmuscle').value||'').trim()||'自訂動作';
+    const sets=Math.max(1,Math.min(10,Number(document.getElementById('newexsets').value)||3));
+    const repsRaw=(document.getElementById('newexreps').value||'10-15').trim()||'10-15';
+    const rdMatch=repsRaw.match(/\d+/);
+    const rd=rdMatch?Number(rdMatch[0]):10;
+    const id='c'+Date.now().toString(36)+Math.random().toString(36).slice(2,5);
+    if(!state.customEx[p])state.customEx[p]=[];
+    state.customEx[p].push({id:id,name:name,muscle:muscle,sets:sets,reps:repsRaw,rd:rd,custom:true});
+    persistCustom();
+    state.addOpen[p]=false;
+    render();
+    toast('已新增「'+name+'」');
+  }
+  else if(a==='delex'){
+    const id=b.dataset.ex;const key=state.part+'|'+id;
+    if(state.delEx===key){
+      if(state.customEx[state.part])state.customEx[state.part]=state.customEx[state.part].filter(e=>e.id!==id);
+      persistCustom();
+      state.delEx=null;render();toast('已刪除這個自訂動作（過去的紀錄還在「紀錄」頁可以看到）');
+    }else{state.delEx=key;refreshCard(id);}
   }
   else if(a==='ghconnect'){
     const t=document.getElementById('ghtoken');const tok=t&&t.value.trim();
@@ -651,7 +747,7 @@ app.addEventListener('click',async e=>{
   else if(a==='ghdisconnect'){disconnectSync();render();}
   else if(a==='ghpull'){await pullSync();}
   else if(a==='copym'){const t=document.getElementById('mtext');const ok=await copyText(t.value);if(!ok){t.removeAttribute('readonly');t.focus();t.select();}toast(ok?'已複製，貼給 Claude 就可以了':'請長按全選後手動複製');}
-  else if(a==='copyb'){const ok=await copyText(JSON.stringify({version:1,logs:state.logs}));toast(ok?'已複製全部備份':'複製失敗，請再試一次');}
+  else if(a==='copyb'){const ok=await copyText(JSON.stringify({version:2,logs:state.logs,customEx:state.customEx}));toast(ok?'已複製全部備份':'複製失敗，請再試一次');}
   else if(a==='import'){
     const raw=document.getElementById('imp').value.trim();
     if(!raw){toast('請先貼上備份內容');return}
@@ -673,6 +769,10 @@ app.addEventListener('click',async e=>{
         });
         n++;
       });
+      if(obj&&obj.customEx&&typeof obj.customEx==='object'){
+        state.customEx=mergeCustom(obj.customEx,state.customEx);
+        persistCustom();
+      }
       persist();render();toast('已還原 '+n+' 天的紀錄');
     }catch(err){toast('備份格式不正確，請確認完整貼上');}
   }
@@ -699,6 +799,7 @@ app.addEventListener('toggle',e=>{if(e.target.classList&&e.target.classList.cont
 if('serviceWorker' in navigator){window.addEventListener('load',()=>{try{navigator.serviceWorker.register('sw.js').catch(()=>{})}catch(e){}});}
 autoPart();
 render();
+loadCustomLocal();
 loadAll().then(async()=>{
   render();
   if(hasStore)setStatus('');
